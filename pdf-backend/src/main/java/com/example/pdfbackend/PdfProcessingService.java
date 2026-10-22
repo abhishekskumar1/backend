@@ -1,7 +1,6 @@
 package com.example.pdfbackend;
 
 import org.apache.pdfbox.multipdf.LayerUtility;
-import org.apache.pdfbox.multipdf.PDFMergerUtility;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
@@ -12,17 +11,20 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 @Service
 public class PdfProcessingService {
 
     // ==========================================
-    // 1. PAGES PER SHEET & YOUR FOLDABLE LOGIC
+    // 1. PAGES PER SHEET & FOLDABLE LOGIC
     // ==========================================
     public byte[] generatePagesPerSheet(byte[] inputBytes, int pagesPerSheet, String paperSize, String mode) throws Exception {
-        
+
         PDRectangle outSize = switch (paperSize.toUpperCase(Locale.ROOT)) {
             case "A3" -> PDRectangle.A3;
             case "LETTER" -> PDRectangle.LETTER;
@@ -56,8 +58,7 @@ public class PdfProcessingService {
                     }
                 }
             } else {
-                // ===== YOUR CUSTOM FOLDABLE LOGIC (Kept 100% intact) =====
-                // Fronts = odd pages, backs = even pages (row-wise mirrored columns)
+                // ===== FOLDABLE BOOKLET LOGIC =====
                 int totalSheets = (int) Math.ceil(srcCount / (double) (pagesPerSheet * 2));
 
                 // 1) Fronts
@@ -69,7 +70,7 @@ public class PdfProcessingService {
 
                     try (PDPageContentStream cs = new PDPageContentStream(dest, outPage)) {
                         for (int j = 0; j < pagesPerSheet; j++) {
-                            int srcIndex1 = batchStart0 + (j * 2) + 1; 
+                            int srcIndex1 = batchStart0 + (j * 2) + 1;
                             if (srcIndex1 <= srcCount) {
                                 drawOne(layer, dest, src, cs, srcIndex1 - 1, j, pagesPerSheet, outSize);
                             }
@@ -92,7 +93,7 @@ public class PdfProcessingService {
                             int reversedCol = cols - 1 - col;
                             int reversedPos = row * cols + reversedCol;
 
-                            int srcIndex1 = batchStart0 + (reversedPos * 2) + 2; 
+                            int srcIndex1 = batchStart0 + (reversedPos * 2) + 2;
                             if (srcIndex1 <= srcCount) {
                                 drawOne(layer, dest, src, cs, srcIndex1 - 1, j, pagesPerSheet, outSize);
                             }
@@ -107,36 +108,19 @@ public class PdfProcessingService {
     }
 
     // ==========================================
-    // 2. MERGE PDF (New Feature)
+    // 2. MERGE PDF (Robust Multi-file merge)
     // ==========================================
     public byte[] mergePdfs(MultipartFile[] files) throws Exception {
-        PDFMergerUtility merger = new PDFMergerUtility();
-        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            merger.setDestinationStream(out);
-            for (MultipartFile file : files) {
-                try (InputStream is = file.getInputStream()) {
-                    merger.addSource(is);
-                }
-            }
-            // Memory setting avoids heavy disk usage
-            merger.mergeDocuments(org.apache.pdfbox.io.MemoryUsageSetting.setupMainMemoryOnly());
-            return out.toByteArray();
-        }
-    }
-
-    // ==========================================
-    // 3. SPLIT PDF (New Feature)
-    // ==========================================
-    public byte[] splitPdf(byte[] inputBytes, String pagesStr) throws Exception {
-        // Note: For now, this is a basic placeholder framework. 
-        // Parsing "1-3,5" requires a custom string parser we can add later.
-        try (PDDocument src = PDDocument.load(inputBytes);
-             PDDocument dest = new PDDocument();
+        try (PDDocument dest = new PDDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-             
-            // Simply saving the first page as a test proof-of-concept
-            if (src.getNumberOfPages() > 0) {
-                dest.addPage(src.getPage(0)); 
+            for (MultipartFile file : files) {
+                if (file != null && !file.isEmpty()) {
+                    try (PDDocument src = PDDocument.load(file.getBytes())) {
+                        for (int i = 0; i < src.getNumberOfPages(); i++) {
+                            dest.importPage(src.getPage(i));
+                        }
+                    }
+                }
             }
             dest.save(out);
             return out.toByteArray();
@@ -144,38 +128,50 @@ public class PdfProcessingService {
     }
 
     // ==========================================
-    // 4. COMPRESS PDF (New Feature)
+    // 3. SPLIT / CUT PDF (Extracts requested page ranges)
+    // ==========================================
+    public byte[] splitPdf(byte[] inputBytes, String pagesStr) throws Exception {
+        try (PDDocument src = PDDocument.load(inputBytes);
+             PDDocument dest = new PDDocument();
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+
+            int total = src.getNumberOfPages();
+            List<Integer> pagesToKeep = parsePageListOrRange(pagesStr, total);
+            for (int p : pagesToKeep) {
+                if (p >= 1 && p <= total) {
+                    dest.importPage(src.getPage(p - 1));
+                }
+            }
+            dest.save(out);
+            return out.toByteArray();
+        }
+    }
+
+    // ==========================================
+    // 4. COMPRESS PDF
     // ==========================================
     public byte[] compressPdf(byte[] inputBytes, String level) throws Exception {
-        // PDFBox doesn't natively "compress" heavily without image re-sampling.
-        // For now, this just passes it through safely to prove the API connects.
-        return inputBytes; 
+        try (PDDocument doc = PDDocument.load(inputBytes);
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            doc.save(out);
+            return out.toByteArray();
+        }
     }
-   // ==========================================
-    // 5. DELETE PAGES
+
+    // ==========================================
+    // 5. DELETE PAGES (Deletes specified pages or ranges)
     // ==========================================
     public byte[] deletePages(byte[] inputBytes, String pagesStr) throws Exception {
         try (PDDocument src = PDDocument.load(inputBytes);
              PDDocument dest = new PDDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
-            // Parse the comma-separated string (e.g., "1,3,5") into a Set
-            java.util.Set<Integer> pagesToDelete = new java.util.HashSet<>();
-            if (pagesStr != null && !pagesStr.isBlank()) {
-                String[] tokens = pagesStr.split(",");
-                for (String token : tokens) {
-                    try {
-                        pagesToDelete.add(Integer.parseInt(token.trim()));
-                    } catch (NumberFormatException ignored) {}
-                }
-            }
-
-            // Add all pages EXCEPT the ones in the delete list
             int totalPages = src.getNumberOfPages();
+            Set<Integer> pagesToDelete = new HashSet<>(parsePageListOrRange(pagesStr, totalPages));
+
             for (int i = 1; i <= totalPages; i++) {
                 if (!pagesToDelete.contains(i)) {
-                    // PDFBox uses 0-based indexing for pages
-                    dest.addPage(src.getPage(i - 1));
+                    dest.importPage(src.getPage(i - 1));
                 }
             }
 
@@ -185,22 +181,21 @@ public class PdfProcessingService {
     }
 
     // ==========================================
-    // 6. REARRANGE PAGES
+    // 6. REARRANGE PAGES (Sequences pages by custom order)
     // ==========================================
     public byte[] rearrangePages(byte[] inputBytes, String order) throws Exception {
         try (PDDocument src = PDDocument.load(inputBytes);
              PDDocument dest = new PDDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 
-            // Parse the new order string (e.g., "3,1,2")
+            int total = src.getNumberOfPages();
             if (order != null && !order.isBlank()) {
-                String[] tokens = order.split(",");
+                String[] tokens = order.replaceAll("\\s+", "").split(",");
                 for (String token : tokens) {
                     try {
                         int pageNum = Integer.parseInt(token.trim());
-                        // Ensure the requested page actually exists in the source document
-                        if (pageNum >= 1 && pageNum <= src.getNumberOfPages()) {
-                            dest.addPage(src.getPage(pageNum - 1));
+                        if (pageNum >= 1 && pageNum <= total) {
+                            dest.importPage(src.getPage(pageNum - 1));
                         }
                     } catch (NumberFormatException ignored) {}
                 }
@@ -210,9 +205,7 @@ public class PdfProcessingService {
             return out.toByteArray();
         }
     }
-    // ==========================================
-    // HELPER METHODS (From your original code)
-    // ==========================================
+
     // ==========================================
     // 7. ADD PAGE NUMBERS (Fully Working)
     // ==========================================
@@ -230,22 +223,25 @@ public class PdfProcessingService {
             for (int i = 0; i < totalPages; i++) {
                 PDPage page = doc.getPage(i);
                 PDRectangle mediaBox = page.getMediaBox();
-                
-                // Determine text to write based on user's selected format
+
                 String text = String.valueOf(currentNumber);
                 if (format.equals("pageX")) text = "Page " + currentNumber;
                 if (format.equals("xOfY")) text = currentNumber + " of " + (startNumber + totalPages - 1);
 
                 float textWidth = font.getStringWidth(text) / 1000 * fontSize;
 
-                // Calculate X and Y coordinates based on position
                 float x = mediaBox.getWidth() - marginOffset - textWidth; // Default to Right
-                if (position.contains("Left")) x = marginOffset;
+                if (position.toLowerCase().contains("left")) {
+                    x = marginOffset;
+                } else if (position.toLowerCase().contains("center")) {
+                    x = (mediaBox.getWidth() - textWidth) / 2f;
+                }
 
                 float y = marginOffset; // Default to Bottom
-                if (position.contains("top")) y = mediaBox.getHeight() - marginOffset - fontSize;
+                if (position.toLowerCase().contains("top")) {
+                    y = mediaBox.getHeight() - marginOffset - fontSize;
+                }
 
-                // Draw the text onto the page
                 try (PDPageContentStream cs = new PDPageContentStream(doc, page, PDPageContentStream.AppendMode.APPEND, true, true)) {
                     cs.beginText();
                     cs.setFont(font, fontSize);
@@ -260,6 +256,43 @@ public class PdfProcessingService {
             return out.toByteArray();
         }
     }
+
+    // ==========================================
+    // HELPER METHODS
+    // ==========================================
+    private List<Integer> parsePageListOrRange(String pagesStr, int totalPages) {
+        List<Integer> result = new ArrayList<>();
+        if (pagesStr == null || pagesStr.isBlank()) {
+            for (int i = 1; i <= totalPages; i++) result.add(i);
+            return result;
+        }
+        String cleaned = pagesStr.replaceAll("\\s+", "");
+        String[] tokens = cleaned.split(",");
+        for (String token : tokens) {
+            if (token.isEmpty()) continue;
+            if (token.contains("-")) {
+                String[] parts = token.split("-");
+                if (parts.length == 2) {
+                    try {
+                        int start = Integer.parseInt(parts[0]);
+                        int end = Integer.parseInt(parts[1]);
+                        if (start <= end) {
+                            for (int i = start; i <= end; i++) {
+                                if (i >= 1 && i <= totalPages) result.add(i);
+                            }
+                        }
+                    } catch (NumberFormatException ignored) {}
+                }
+            } else {
+                try {
+                    int p = Integer.parseInt(token);
+                    if (p >= 1 && p <= totalPages) result.add(p);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return result;
+    }
+
     private int gridCols(int pagesPerSheet) {
         return switch (pagesPerSheet) {
             case 2 -> 1;
@@ -318,6 +351,4 @@ public class PdfProcessingService {
         cs.drawForm(form);
         cs.restoreGraphicsState();
     }
-
 }
-
