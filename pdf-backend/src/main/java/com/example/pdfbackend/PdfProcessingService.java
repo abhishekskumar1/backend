@@ -111,19 +111,26 @@ public class PdfProcessingService {
     // 2. MERGE PDF (Robust Multi-file merge)
     // ==========================================
     public byte[] mergePdfs(MultipartFile[] files) throws Exception {
+        List<PDDocument> srcDocs = new ArrayList<>();
         try (PDDocument dest = new PDDocument();
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             for (MultipartFile file : files) {
                 if (file != null && !file.isEmpty()) {
-                    try (PDDocument src = PDDocument.load(file.getBytes())) {
-                        for (int i = 0; i < src.getNumberOfPages(); i++) {
-                            dest.importPage(src.getPage(i));
-                        }
+                    PDDocument src = PDDocument.load(file.getBytes());
+                    srcDocs.add(src);
+                    for (int i = 0; i < src.getNumberOfPages(); i++) {
+                        dest.importPage(src.getPage(i));
                     }
                 }
             }
             dest.save(out);
             return out.toByteArray();
+        } finally {
+            for (PDDocument doc : srcDocs) {
+                try {
+                    doc.close();
+                } catch (Exception ignored) {}
+            }
         }
     }
 
